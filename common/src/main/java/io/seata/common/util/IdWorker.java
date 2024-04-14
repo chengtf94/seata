@@ -1,18 +1,3 @@
-/*
- *  Copyright 1999-2019 Seata.io Group.
- *
- *  Licensed under the Apache License, Version 2.0 (the "License");
- *  you may not use this file except in compliance with the License.
- *  You may obtain a copy of the License at
- *
- *       http://www.apache.org/licenses/LICENSE-2.0
- *
- *  Unless required by applicable law or agreed to in writing, software
- *  distributed under the License is distributed on an "AS IS" BASIS,
- *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *  See the License for the specific language governing permissions and
- *  limitations under the License.
- */
 package io.seata.common.util;
 
 import java.net.NetworkInterface;
@@ -21,37 +6,24 @@ import java.util.Random;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
+ * ID生成器：基于改良版雪花算法
+ *
  * @author funkye
  * @author selfishlover
  */
 public class IdWorker {
 
-    /**
-     * Start time cut (2020-05-03)
-     */
+    /** 起始时间戳 (2020-05-03) */
     private final long twepoch = 1588435200000L;
 
-    /**
-     * The number of bits occupied by workerId
-     */
+    /** 机器号（工作节点ID）位数、时间戳位数、序列号位数、最大机器号ID（1023） */
     private final int workerIdBits = 10;
-
-    /**
-     * The number of bits occupied by timestamp
-     */
     private final int timestampBits = 41;
-
-    /**
-     * The number of bits occupied by sequence
-     */
     private final int sequenceBits = 12;
-
-    /**
-     * Maximum supported machine id, the result is 1023
-     */
     private final int maxWorkerId = ~(-1 << workerIdBits);
 
     /**
+     * 机器号ID
      * business meaning: machine ID (0 ~ 1023)
      * actual layout in memory:
      * highest 1 bit: 0
@@ -61,6 +33,7 @@ public class IdWorker {
     private long workerId;
 
     /**
+     * 时间戳&序列号
      * timestamp and sequence mix in one Long
      * highest 11 bit: not used
      * middle  41 bit: timestamp
@@ -69,32 +42,29 @@ public class IdWorker {
     private AtomicLong timestampAndSequence;
 
     /**
-     * mask that help to extract timestamp and sequence from a long
+     * 时间戳&序列号掩码
      */
     private final long timestampAndSequenceMask = ~(-1L << (timestampBits + sequenceBits));
 
-    /**
-     * instantiate an IdWorker using given workerId
-     * @param workerId if null, then will auto assign one
-     */
+    /** 构造方法 */
     public IdWorker(Long workerId) {
         initTimestampAndSequence();
         initWorkerId(workerId);
     }
 
-    /**
-     * init first timestamp and sequence immediately
-     */
+    /** 初始化时间戳&序列号 */
     private void initTimestampAndSequence() {
         long timestamp = getNewestTimestamp();
         long timestampWithSequence = timestamp << sequenceBits;
         this.timestampAndSequence = new AtomicLong(timestampWithSequence);
     }
 
-    /**
-     * init workerId
-     * @param workerId if null, then auto generate one
-     */
+    /** 获取最新的时间戳：now - 起始时间戳 */
+    private long getNewestTimestamp() {
+        return System.currentTimeMillis() - twepoch;
+    }
+
+    /** 初始化机器号 */
     private void initWorkerId(Long workerId) {
         if (workerId == null) {
             workerId = generateWorkerId();
@@ -106,7 +76,38 @@ public class IdWorker {
         this.workerId = workerId << (timestampBits + sequenceBits);
     }
 
+    /** 生成机器号ID */
+    private long generateWorkerId() {
+        try {
+            return generateWorkerIdBaseOnMac();
+        } catch (Exception e) {
+            return generateRandomWorkerId();
+        }
+    }
+
+    /** 基于MAC地址生成机器号ID */
+    private long generateWorkerIdBaseOnMac() throws Exception {
+        Enumeration<NetworkInterface> all = NetworkInterface.getNetworkInterfaces();
+        while (all.hasMoreElements()) {
+            NetworkInterface networkInterface = all.nextElement();
+            boolean isLoopback = networkInterface.isLoopback();
+            boolean isVirtual = networkInterface.isVirtual();
+            if (isLoopback || isVirtual) {
+                continue;
+            }
+            byte[] mac = networkInterface.getHardwareAddress();
+            return ((mac[4] & 0B11) << 8) | (mac[5] & 0xFF);
+        }
+        throw new RuntimeException("no available mac found");
+    }
+
+    /** 生成随机的工作机器号（工作节点ID） */
+    private long generateRandomWorkerId() {
+        return new Random().nextInt(maxWorkerId + 1);
+    }
+
     /**
+     * 获取下一个ID
      * get next UUID(base on snowflake algorithm), which look like:
      * highest 1 bit: always 0
      * next   10 bit: workerId
@@ -115,6 +116,7 @@ public class IdWorker {
      * @return UUID
      */
     public long nextId() {
+        // 改良版的关键：时间戳&序列号作为一个整体，作为低53位
         waitIfNecessary();
         long next = timestampAndSequence.incrementAndGet();
         long timestampWithSequence = next & timestampAndSequenceMask;
@@ -138,50 +140,4 @@ public class IdWorker {
         }
     }
 
-    /**
-     * get newest timestamp relative to twepoch
-     */
-    private long getNewestTimestamp() {
-        return System.currentTimeMillis() - twepoch;
-    }
-
-    /**
-     * auto generate workerId, try using mac first, if failed, then randomly generate one
-     * @return workerId
-     */
-    private long generateWorkerId() {
-        try {
-            return generateWorkerIdBaseOnMac();
-        } catch (Exception e) {
-            return generateRandomWorkerId();
-        }
-    }
-
-    /**
-     * use lowest 10 bit of available MAC as workerId
-     * @return workerId
-     * @throws Exception when there is no available mac found
-     */
-    private long generateWorkerIdBaseOnMac() throws Exception {
-        Enumeration<NetworkInterface> all = NetworkInterface.getNetworkInterfaces();
-        while (all.hasMoreElements()) {
-            NetworkInterface networkInterface = all.nextElement();
-            boolean isLoopback = networkInterface.isLoopback();
-            boolean isVirtual = networkInterface.isVirtual();
-            if (isLoopback || isVirtual) {
-                continue;
-            }
-            byte[] mac = networkInterface.getHardwareAddress();
-            return ((mac[4] & 0B11) << 8) | (mac[5] & 0xFF);
-        }
-        throw new RuntimeException("no available mac found");
-    }
-
-    /**
-     * randomly generate one as workerId
-     * @return workerId
-     */
-    private long generateRandomWorkerId() {
-        return new Random().nextInt(maxWorkerId + 1);
-    }
 }
